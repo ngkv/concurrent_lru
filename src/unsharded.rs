@@ -1,28 +1,53 @@
 use std::{
-    borrow::Borrow,
     cell::UnsafeCell,
     collections::{hash_map::Entry, HashMap},
     hash::Hash,
     ops::{Deref, DerefMut},
-    ptr::null,
+    ptr::{self, null},
     sync::{
         atomic::{AtomicBool, Ordering},
         Mutex, MutexGuard,
     },
-    todo,
 };
 
 use once_cell::sync::OnceCell;
 
 enum Never {}
 
+struct NodePtr<K, V>(*const Node<K, V>);
+
+impl<K, V> Copy for NodePtr<K, V> {}
+
+impl<K, V> Clone for NodePtr<K, V> {
+    fn clone(&self) -> Self {
+        NodePtr(self.0)
+    }
+}
+
+impl<K, V> PartialEq for NodePtr<K, V> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.eq(&other.0)
+    }
+}
+
+impl<K, V> Eq for NodePtr<K, V> {}
+
+impl<K, V> Deref for NodePtr<K, V> {
+    type Target = Node<K, V>;
+
+    fn deref(&self) -> &Self::Target {
+        assert!(self.0 != ptr::null());
+        unsafe { &*self.0 }
+    }
+}
+
 struct NodeState<K, V> {
     /// Count of corresponding `CacheHandle`.
     rc: u32,
     charge: u64,
     key: Option<K>,
-    prev: *const Node<K, V>,
-    next: *const Node<K, V>,
+    prev: NodePtr<K, V>,
+    next: NodePtr<K, V>,
 }
 
 /// Represents an element in cache. The node must be in one of following states:
@@ -53,12 +78,23 @@ struct Node<K, V> {
     value_init: AtomicBool,
 }
 
+impl<K, V> Node<K, V> {
+    fn state(&self, _: &mut LruState<K, V>) -> &mut NodeState<K, V> {
+        unsafe { self.state_unchecked() }
+    }
+
+    /// Requires: Big lock is held & basic alias rules.
+    unsafe fn state_unchecked(&self) -> &mut NodeState<K, V> {
+        &mut *self.state.get()
+    }
+}
+
 pub struct CacheHandle<'a, K, V>
 where
     K: Hash + Eq + Clone,
 {
     lru: &'a Lru<K, V>,
-    node: *const Node<K, V>,
+    node: NodePtr<K, V>,
 }
 
 unsafe impl<'a, K, V> Send for CacheHandle<'a, K, V> where K: Hash + Eq + Clone {}
@@ -69,7 +105,8 @@ where
     K: Hash + Eq + Clone,
 {
     pub fn value(&self) -> &V {
-        unsafe { (*self.node).value.get().unwrap() }
+        debug_assert!(self.node.value_init.load(Ordering::Acquire));
+        (*self.node).value.get().unwrap()
     }
 }
 
@@ -134,8 +171,8 @@ impl<K, V> NodeBox<K, V> {
         Self(Box::into_raw(Box::new(node)))
     }
 
-    fn as_ptr(&self) -> *const Node<K, V> {
-        self.0
+    fn as_ptr(&self) -> NodePtr<K, V> {
+        NodePtr(self.0)
     }
 }
 
@@ -159,50 +196,48 @@ impl<K, V> Lru<K, V>
 where
     K: Hash + Eq + Clone,
 {
-    unsafe fn link(cur: *const Node<K, V>, next: *const Node<K, V>) {
-        (*(*cur).state.get()).next = next;
-        (*(*next).state.get()).prev = cur;
+    fn link(this: &mut LruState<K, V>, cur: NodePtr<K, V>, next: NodePtr<K, V>) {
+        cur.state(this).next = next;
+        next.state(this).prev = cur;
     }
 
     /// Append node to list tail (newest).
-    unsafe fn list_append(this: &mut LruState<K, V>, node: *const Node<K, V>) {
+    fn list_append(this: &mut LruState<K, V>, node: NodePtr<K, V>) {
         this.list_size += 1;
-        let dummy = this.list_dummy.deref();
-        let prev = (*dummy.state.get()).prev;
-        Self::link(node, dummy);
-        Self::link(prev, node);
+        let dummy = this.list_dummy.as_ptr();
+        let prev = dummy.state(this).prev;
+        Self::link(this, node, dummy);
+        Self::link(this, prev, node);
     }
 
-    unsafe fn list_remove(this: &mut LruState<K, V>, node: *const Node<K, V>) {
+    fn list_remove(this: &mut LruState<K, V>, node: NodePtr<K, V>) {
         this.list_size -= 1;
-        let node = &mut *(*node).state.get();
-        Self::link(node.prev, node.next);
-        node.prev = null();
-        node.next = null();
+        let node = node.state(this);
+        Self::link(this, node.prev, node.next);
+        node.prev = NodePtr(null());
+        node.next = NodePtr(null());
     }
 
     fn maybe_evict_old(mut guard: MutexGuard<LruState<K, V>>, evict_all: bool) {
         let mut evict_nodes = vec![];
         let this = guard.deref_mut();
 
-        unsafe {
-            while (evict_all && this.list_size > 0) || (this.total_charge > this.capacity) {
-                // Only obtain a shared reference to the dummy node.
-                let oldest_ptr = (*this.list_dummy.state.get()).next;
-                assert!(oldest_ptr != this.list_dummy.deref());
+        while (evict_all && this.list_size > 0) || (this.total_charge > this.capacity) {
+            // Only obtain a shared reference to the dummy node.
+            let oldest_ptr = this.list_dummy.as_ptr().state(this).next;
+            assert!(oldest_ptr != this.list_dummy.as_ptr());
 
-                let oldest = &mut *(*oldest_ptr).state.get();
-                assert!(oldest.rc == 0);
+            let oldest = oldest_ptr.state(this);
+            assert!(oldest.rc == 0);
 
-                this.total_charge -= oldest.charge;
+            this.total_charge -= oldest.charge;
 
-                // Remove node from hash map.
-                let node = this.map.remove(oldest.key.as_ref().unwrap()).unwrap();
-                evict_nodes.push(node);
+            // Remove node from hash map.
+            let node = this.map.remove(oldest.key.as_ref().unwrap()).unwrap();
+            evict_nodes.push(node);
 
-                // Remove node from LRU list.
-                Self::list_remove(this, oldest_ptr);
-            }
+            // Remove node from LRU list.
+            Self::list_remove(this, oldest_ptr);
         }
 
         // IMPORTANT: Drop user value without lock held.
@@ -210,31 +245,27 @@ where
         drop(evict_nodes);
     }
 
-    fn node_unpin(this: &mut LruState<K, V>, node_ptr: *const Node<K, V>) {
-        unsafe {
-            let node = &mut *(*node_ptr).state.get();
-            node.rc = node.rc.checked_sub(1).unwrap();
-            if node.rc == 0 {
-                Self::list_append(this, node_ptr);
-            }
+    fn node_unpin(this: &mut LruState<K, V>, node_ptr: NodePtr<K, V>) {
+        let node = node_ptr.state(this);
+        node.rc = node.rc.checked_sub(1).unwrap();
+        if node.rc == 0 {
+            Self::list_append(this, node_ptr);
         }
     }
 
-    fn node_pin(this: &mut LruState<K, V>, node_ptr: *const Node<K, V>) {
-        unsafe {
-            let node = &mut *(*node_ptr).state.get();
-            node.rc += 1;
-            if node.rc == 1 {
-                Self::list_remove(this, node_ptr);
-            }
+    fn node_pin(this: &mut LruState<K, V>, node_ptr: NodePtr<K, V>) {
+        let node = node_ptr.state(this);
+        node.rc += 1;
+        if node.rc == 1 {
+            Self::list_remove(this, node_ptr);
         }
     }
 
     fn new_impl(capacity: u64) -> Self {
         let dummy = NodeBox::new(Node {
             state: UnsafeCell::new(NodeState {
-                prev: null(),
-                next: null(),
+                prev: NodePtr(null()),
+                next: NodePtr(null()),
                 key: None,
                 rc: 0,
                 charge: 0,
@@ -266,20 +297,21 @@ where
         let mut guard = self.state.lock().unwrap();
         let this = guard.deref_mut();
         match this.map.entry(key) {
-            Entry::Occupied(ent) => unsafe {
+            Entry::Occupied(ent) => {
                 let node_ptr = ent.get().as_ptr();
-                let node = &mut *(*node_ptr).state.get();
+                // SATETY: We are holding the lock.
+                let node = unsafe { node_ptr.state_unchecked() };
                 // In LRU list?
                 if node.rc == 0 {
-                    this.total_charge -= node.charge;
                     let evicted = ent.remove();
+                    this.total_charge -= node.charge;
                     Self::list_remove(this, node_ptr);
 
                     // IMPORTANT: Drop user value without lock held.
                     drop(guard);
                     drop(evicted);
                 }
-            },
+            }
             _ => {}
         };
     }
@@ -304,11 +336,8 @@ where
         let this = guard.deref_mut();
         let node_ptr = this.map.get(&key)?.as_ptr();
 
-        unsafe {
-            let node = &*node_ptr;
-            if !node.value_init.load(Ordering::Acquire) {
-                return None;
-            }
+        if !node_ptr.value_init.load(Ordering::Acquire) {
+            return None;
         }
 
         Self::node_pin(this, node_ptr);
@@ -343,9 +372,9 @@ where
                     value_init: AtomicBool::new(false),
                     state: UnsafeCell::new(NodeState {
                         charge,
-                        prev: null(),
+                        prev: NodePtr(null()),
+                        next: NodePtr(null()),
                         key: Some(key.clone()),
-                        next: null(),
                         rc: 1,
                     }),
                 });
@@ -359,26 +388,36 @@ where
         Self::maybe_evict_old(guard, false);
 
         // IMPORTANT: Call user-provided init function without lock held.
-        let node = unsafe { &*node_ptr };
-        match node.value.get_or_try_init(|| init(&key)) {
+        match node_ptr.value.get_or_try_init(|| init(&key)) {
             Ok(_) => {
-                node.value_init.store(true, Ordering::Release);
+                node_ptr.value_init.store(true, Ordering::Release);
                 Ok(CacheHandle {
                     lru: self,
                     node: node_ptr,
                 })
             }
             Err(e) => {
+                // Value initialization failed. Cleanup.
                 let mut guard = self.state.lock().unwrap();
-                Self::node_unpin(guard.deref_mut(), node_ptr);
+                let this = guard.deref_mut();
 
-                unsafe {
-                    let node = &mut *node.state.get();
-                    node.rc = node.rc.checked_sub(1).unwrap();
-                    if node.rc == 0 {
-                        this.total_charge -= node.charge;
-                        let evicted = ent.remove();
-                    }
+                // There is a chance that, another thread calling
+                // `get_or_try_init` on the same key has initialized the value
+                // (after our failure), then unpinned. In such case, we should
+                // not evict the value directly, but put it into LRU list.
+                //
+                // However, since it does not affect correctness, and I believe
+                // it is really rare, so it's ignored.
+
+                let node = node_ptr.state(this);
+                node.rc = node.rc.checked_sub(1).unwrap();
+                if node.rc == 0 {
+                    this.total_charge -= node.charge;
+                    let evicted = this.map.remove(&key);
+
+                    // IMPORTANT: Drop user value without lock held.
+                    drop(guard);
+                    drop(evicted);
                 }
 
                 Err(e)
@@ -429,6 +468,7 @@ mod tests {
             Arc,
         },
         thread,
+        time::{Duration, Instant},
     };
 
     #[test]
@@ -524,8 +564,63 @@ mod tests {
         assert_eq!(*evicted.lock().unwrap(), vec![1, 2, 3, 5, 6, 4]);
     }
 
+    #[test]
+    fn init_failure() {
+        let cache = Lru::<u32, u32>::new(10);
+
+        cache.get_or_try_init(1, 1, |&k| Ok::<_, ()>(k)).unwrap();
+        assert_eq!(cache.get(1).as_ref().map(|h| h.value()), Some(&1));
+
+        cache.get_or_try_init(2, 1, |&k| Ok::<_, ()>(k)).unwrap();
+        assert_eq!(cache.get(2).as_ref().map(|h| h.value()), Some(&2));
+
+        assert!(cache.get_or_try_init(3, 1, |_| Err::<_, ()>(())).is_err());
+        assert!(cache.get(3).is_none());
+        cache.get_or_try_init(3, 1, |&k| Ok::<_, ()>(k)).unwrap();
+        assert_eq!(cache.get(3).as_ref().map(|h| h.value()), Some(&3));
+    }
+
     unsafe fn override_lifetime<'a, 'b, T>(t: &'a T) -> &'b T {
         mem::transmute(t)
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn not_blocking_other() {
+        struct Blocking;
+
+        impl Blocking {
+            fn new() -> Blocking {
+                thread::sleep(Duration::from_secs(1));
+                Blocking
+            }
+        }
+
+        impl Drop for Blocking {
+            fn drop(&mut self) {
+                thread::sleep(Duration::from_secs(1))
+            }
+        }
+
+        let lru = Lru::new(40);
+
+        let time_start = Instant::now();
+        let mut handles = vec![];
+        for _ in 0..20 {
+            handles.push(thread::spawn({
+                let lru = unsafe { override_lifetime(&lru) };
+                move || {
+                    lru.get_or_init(1, 10, |_| Blocking::new());
+                }
+            }));
+        }
+
+        // Join threads.
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert!((Instant::now() - time_start).as_secs() <= 3);
     }
 
     #[test]
@@ -543,7 +638,7 @@ mod tests {
         }
 
         let capacity = 100;
-        let threads = 1;
+        let threads = 8;
         let per_thread_count = 10000;
         let yield_interval = 1000;
 
@@ -559,15 +654,25 @@ mod tests {
                 let drop_counter = unsafe { override_lifetime(&drop_charge) };
                 move || {
                     let mut rng = StdRng::from_entropy();
-                    for i in 0..per_thread_count {
+                    for _ in 0..per_thread_count {
+                        let i = rng.sample(Uniform::new(0, 100));
                         let charge = rng.sample(Uniform::new(1, 5));
-                        lru.get_or_init(i, charge, |_| {
-                            init_counter.fetch_add(charge, Ordering::Relaxed);
-                            IncCounterOnDrop {
-                                charge,
-                                counter: &drop_counter,
+                        let fail = rng.sample(Uniform::new(0, 10)) >= 8;
+                        let res = lru.get_or_try_init(i, charge, |_| {
+                            if fail {
+                                Err(())
+                            } else {
+                                init_counter.fetch_add(charge, Ordering::Relaxed);
+                                Ok(IncCounterOnDrop {
+                                    charge,
+                                    counter: &drop_counter,
+                                })
                             }
                         });
+
+                        if !fail {
+                            assert!(res.is_ok());
+                        }
 
                         if i % yield_interval == 0 {
                             thread::yield_now();
@@ -582,7 +687,6 @@ mod tests {
             h.join().unwrap();
         }
 
-        assert!(init_charge.load(Ordering::Relaxed) >= per_thread_count);
         assert!(lru.total_charge() <= capacity);
         assert_eq!(
             init_charge.load(Ordering::Relaxed),
