@@ -241,10 +241,9 @@ where
         let mut evict_nodes = vec![];
         let this = guard.deref_mut();
 
-        while (evict_all && this.list_size > 0) || (this.total_charge > this.capacity) {
-            // Only obtain a shared reference to the dummy node.
+        while (evict_all || this.total_charge > this.capacity) && this.list_size > 0 {
             let oldest_ptr = this.list_dummy.as_ptr().state(this).next;
-            assert!(oldest_ptr != this.list_dummy.as_ptr());
+            assert!(oldest_ptr != this.list_dummy.as_ptr(),);
 
             let oldest = oldest_ptr.state(this);
             assert!(oldest.rc == 0);
@@ -479,9 +478,9 @@ mod compile_time_assertions {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::override_lifetime;
     use rand::{distributions::Uniform, prelude::*};
     use std::{
-        mem,
         sync::{
             atomic::{AtomicU64, Ordering},
             Arc,
@@ -597,10 +596,6 @@ mod tests {
         assert!(cache.get(3).is_none());
         cache.get_or_try_init(3, 1, |&k| Ok::<_, ()>(k)).unwrap();
         assert_eq!(cache.get(3).as_ref().map(|h| h.value()), Some(&3));
-    }
-
-    unsafe fn override_lifetime<'a, 'b, T>(t: &'a T) -> &'b T {
-        mem::transmute(t)
     }
 
     #[test]
