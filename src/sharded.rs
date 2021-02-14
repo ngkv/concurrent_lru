@@ -148,3 +148,91 @@ mod compile_time_assertions {
 
     fn _assert_send_sync<S: Send + Sync>(_: &S) {}
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::override_lifetime;
+    use super::*;
+    use rand::{distributions::Uniform, prelude::*};
+    use std::{
+        sync::atomic::{AtomicU64, Ordering},
+        thread,
+    };
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn sharded_stress() {
+        struct IncCounterOnDrop<'a> {
+            charge: u64,
+            counter: &'a AtomicU64,
+        }
+
+        impl<'a> Drop for IncCounterOnDrop<'a> {
+            fn drop(&mut self) {
+                self.counter.fetch_add(self.charge, Ordering::Relaxed);
+            }
+        }
+
+        let capacity = 128;
+        let threads = 8;
+        let per_thread_count = 10000;
+        let yield_interval = 1000;
+
+        let init_charge = AtomicU64::new(0);
+        let drop_charge = AtomicU64::new(0);
+        let lru = LruCache::new(capacity);
+
+        let mut handles = vec![];
+        for _ in 0..threads {
+            handles.push(thread::spawn({
+                let lru = unsafe { override_lifetime(&lru) };
+                let init_counter = unsafe { override_lifetime(&init_charge) };
+                let drop_counter = unsafe { override_lifetime(&drop_charge) };
+                move || {
+                    let mut rng = StdRng::from_entropy();
+                    for _ in 0..per_thread_count {
+                        let i = rng.sample(Uniform::new(0, 100));
+                        let charge = rng.sample(Uniform::new(1, 5));
+                        let fail = rng.sample(Uniform::new(0, 10)) >= 8;
+                        let res = lru.get_or_try_init(i, charge, |_| {
+                            if fail {
+                                Err(())
+                            } else {
+                                init_counter.fetch_add(charge, Ordering::Relaxed);
+                                Ok(IncCounterOnDrop {
+                                    charge,
+                                    counter: &drop_counter,
+                                })
+                            }
+                        });
+
+                        if !fail {
+                            assert!(res.is_ok());
+                        }
+
+                        if i % yield_interval == 0 {
+                            thread::yield_now();
+                        }
+                    }
+                }
+            }));
+        }
+
+        // Join threads.
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert!(lru.total_charge() <= capacity);
+        assert_eq!(
+            init_charge.load(Ordering::Relaxed),
+            lru.total_charge() + drop_charge.load(Ordering::Relaxed)
+        );
+
+        lru.prune();
+        assert_eq!(
+            init_charge.load(Ordering::Relaxed),
+            drop_charge.load(Ordering::Relaxed)
+        );
+    }
+}

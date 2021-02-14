@@ -22,14 +22,18 @@
 
 //! An implementation of a concurrent LRU cache. It is designed to hold heavyweight
 //! resources, e.g. file descriptors, disk pages. The implementation is heavily
-//! influenced by the LRU cache in LevelDB.
+//! influenced by the [LRU cache in LevelDB].
 //!
-//! The project is at a very early stage. Currently it is implemented with a linked
-//! hashmap protected by a big lock, which is not concurrent at all. Later, a
-//! sharded version would be implemented.
+//! Currently there are two implementations, `unsharded` and `sharded`.
+//!
+//! - `unsharded` is a linked hashmap protected by a big lock.
+//! - `sharded` shards `unsharded` by key, providing better performance under
+//!   contention.
+//!
+//! ## Example
 //!
 //! ```rust,no_run
-//! use concurrent_lru::unsharded::LruCache;
+//! use concurrent_lru::sharded::LruCache;
 //! use std::{fs, io};
 //!
 //! fn read(_f: &fs::File) -> io::Result<()> {
@@ -57,5 +61,10 @@
 //! }
 //! ```
 
-pub mod unsharded;
 pub mod sharded;
+pub mod unsharded;
+
+#[cfg(test)]
+unsafe fn override_lifetime<'a, 'b, T>(t: &'a T) -> &'b T {
+    std::mem::transmute(t)
+}
