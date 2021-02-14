@@ -10,6 +10,8 @@ The project is at a very early stage. Currently it is implemented with a linked
 hashmap protected by a big lock, which is not concurrent at all. Later, a
 sharded version would be implemented.
 
+## Example
+
 ```rust,no_run
 use concurrent_lru::unsharded::LruCache;
 use std::{fs, io};
@@ -38,5 +40,14 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 ```
+
+## Contribution
+
+Contributions are welcome! Please [fork the
+library](https://github.com/ngkv/concurrent_lru/fork), push changes to your
+fork, and send a [pull
+request](https://help.github.com/articles/creating-a-pull-request-from-a-fork/).
+All contributions are shared under an MIT license unless explicitly stated
+otherwise in the pull request.
 
 [license badge]: https://img.shields.io/badge/license-MIT-blue.svg
