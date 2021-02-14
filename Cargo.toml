@@ -1,6 +1,6 @@
 [package]
 name = "concurrent_lru"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Jianong Zhong <zhongjn0@foxmail.com>"]
 edition = "2018"
 description = "A concurrent LRU cache"
