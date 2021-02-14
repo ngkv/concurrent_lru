@@ -93,7 +93,7 @@ pub struct CacheHandle<'a, K, V>
 where
     K: Hash + Eq + Clone,
 {
-    lru: &'a Lru<K, V>,
+    lru: &'a LruCache<K, V>,
     node: NodePtr<K, V>,
 }
 
@@ -116,8 +116,8 @@ where
 {
     fn drop(&mut self) {
         if let Ok(mut guard) = self.lru.state.lock() {
-            Lru::node_unpin(guard.deref_mut(), self.node);
-            Lru::maybe_evict_old(guard, false);
+            LruCache::node_unpin(guard.deref_mut(), self.node);
+            LruCache::maybe_evict_old(guard, false);
         }
     }
 }
@@ -147,14 +147,14 @@ struct LruState<K, V> {
 /// Keys should be lightweight, while values could be heavyweight. That is,
 /// creating (`Lru::get_or_init`) and dropping value could be time-consuming,
 /// and the cache itself would not be blocked.
-pub struct Lru<K, V> {
+pub struct LruCache<K, V> {
     state: Mutex<LruState<K, V>>,
 }
 
-unsafe impl<K, V> Send for Lru<K, V> {}
-unsafe impl<K, V> Sync for Lru<K, V> {}
+unsafe impl<K, V> Send for LruCache<K, V> {}
+unsafe impl<K, V> Sync for LruCache<K, V> {}
 
-impl<K, V> Lru<K, V>
+impl<K, V> LruCache<K, V>
 where
     K: Send + Sync + Hash + Eq + Clone,
     V: Send + Sync,
@@ -192,7 +192,7 @@ impl<K, V> Drop for NodeBox<K, V> {
     }
 }
 
-impl<K, V> Lru<K, V>
+impl<K, V> LruCache<K, V>
 where
     K: Hash + Eq + Clone,
 {
@@ -448,7 +448,7 @@ mod compile_time_assertions {
 
     #[allow(unreachable_code)]
     fn _assert_public_types_send_sync() {
-        _assert_send_sync::<Lru<u32, u32>>(unreachable!());
+        _assert_send_sync::<LruCache<u32, u32>>(unreachable!());
         _assert_send_sync::<CacheHandle<u32, u32>>(unreachable!());
     }
 
@@ -473,7 +473,7 @@ mod tests {
 
     #[test]
     fn simple_get_or_init() {
-        let cache = Lru::<u32, u32>::new(10);
+        let cache = LruCache::<u32, u32>::new(10);
         assert_eq!(cache.get_or_init(1, 1, |_| 1).value(), &1);
         assert_eq!(cache.get_or_init(2, 1, |_| 2).value(), &2);
         assert_eq!(cache.get_or_init(1, 1, |_| 3).value(), &1);
@@ -481,7 +481,7 @@ mod tests {
 
     #[test]
     fn reinsert_after_eviction() {
-        let cache = Lru::<u32, u32>::new(5);
+        let cache = LruCache::<u32, u32>::new(5);
         assert_eq!(cache.get_or_init(1, 3, |_| 1).value(), &1);
         assert_eq!(cache.get_or_init(2, 3, |_| 2).value(), &2);
         assert_eq!(cache.get_or_init(1, 3, |_| 3).value(), &3);
@@ -489,7 +489,7 @@ mod tests {
 
     #[test]
     fn advice_evict() {
-        let cache = Lru::<u32, u32>::new(5);
+        let cache = LruCache::<u32, u32>::new(5);
         let handle = cache.get_or_init(1, 3, |_| 1);
         cache.advice_evict(1); // Shoule be rejected.
         assert!(cache.get(1).is_some());
@@ -515,7 +515,7 @@ mod tests {
     fn evicted_dropped() {
         let evicted = Arc::new(Mutex::new(Vec::new()));
 
-        let cache = Lru::<u32, DropRecorded>::new(2);
+        let cache = LruCache::<u32, DropRecorded>::new(2);
         let insert_new = |id| {
             cache.get_or_init(id, 1, |&id| DropRecorded {
                 id,
@@ -534,7 +534,7 @@ mod tests {
     fn pin_unpin_eviction() {
         let evicted = Arc::new(Mutex::new(Vec::new()));
 
-        let cache = Lru::<u32, DropRecorded>::new(2);
+        let cache = LruCache::<u32, DropRecorded>::new(2);
         let insert_new = |id| {
             cache.get_or_init(id, 1, |&id| DropRecorded {
                 id,
@@ -566,7 +566,7 @@ mod tests {
 
     #[test]
     fn init_failure() {
-        let cache = Lru::<u32, u32>::new(10);
+        let cache = LruCache::<u32, u32>::new(10);
 
         cache.get_or_try_init(1, 1, |&k| Ok::<_, ()>(k)).unwrap();
         assert_eq!(cache.get(1).as_ref().map(|h| h.value()), Some(&1));
@@ -602,7 +602,7 @@ mod tests {
             }
         }
 
-        let lru = Lru::new(40);
+        let lru = LruCache::new(40);
 
         let time_start = Instant::now();
         let mut handles = vec![];
@@ -644,7 +644,7 @@ mod tests {
 
         let init_charge = AtomicU64::new(0);
         let drop_charge = AtomicU64::new(0);
-        let lru = Lru::new(capacity);
+        let lru = LruCache::new(capacity);
 
         let mut handles = vec![];
         for _ in 0..threads {
