@@ -1,10 +1,12 @@
 # Concurrent LRU
 
-![License Badge]
+[![crates.io Badge]][crates.io package]
+[![docs.rs Badge]][docs.rs documentation]
+[![License Badge]][license]
 
 An implementation of a concurrent LRU cache. It is designed to hold heavyweight
 resources, e.g. file descriptors, disk pages. The implementation is heavily
-influenced by the LRU cache in LevelDB.
+influenced by the [LRU cache in LevelDB].
 
 The project is at a very early stage. Currently it is implemented with a linked
 hashmap protected by a big lock, which is not concurrent at all. Later, a
@@ -51,3 +53,11 @@ All contributions are shared under an MIT license unless explicitly stated
 otherwise in the pull request.
 
 [license badge]: https://img.shields.io/badge/license-MIT-blue.svg
+[crates.io badge]: https://img.shields.io/crates/v/concurrent_lru.svg
+[crates.io package]: https://crates.io/crates/concurrent_lru
+[documentation]: https://docs.rs/concurrent_lru
+[docs.rs badge]: https://docs.rs/concurrent_lru/badge.svg
+[docs.rs documentation]: https://docs.rs/concurrent_lru/
+[license badge]: https://img.shields.io/badge/license-MIT-blue.svg
+[license]: https://raw.githubusercontent.com/ngkv/concurrent_lru/master/LICENSE
+[LRU cache in LevelDB]: https://github.com/google/leveldb/blob/master/util/cache.cc
