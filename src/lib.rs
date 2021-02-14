@@ -58,3 +58,4 @@
 //! ```
 
 pub mod unsharded;
+pub mod sharded;
