@@ -1,6 +1,7 @@
 use std::{
     cell::UnsafeCell,
     collections::{hash_map::Entry, HashMap},
+    fmt,
     hash::Hash,
     ops::{Deref, DerefMut},
     ptr::{self, null},
@@ -8,6 +9,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Mutex, MutexGuard,
     },
+    todo,
 };
 
 use once_cell::sync::OnceCell;
@@ -149,6 +151,24 @@ struct LruState<K, V> {
 /// and the cache itself would not be blocked.
 pub struct LruCache<K, V> {
     state: Mutex<LruState<K, V>>,
+}
+
+impl<K, V> fmt::Debug for LruCache<K, V>
+where
+    K: fmt::Debug,
+    V: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let guard = self.state.lock().unwrap();
+        f.debug_map()
+            .entries(
+                guard
+                    .map
+                    .iter()
+                    .filter_map(|(k, v)| Some((k, v.deref().value.get()?))),
+            )
+            .finish()
+    }
 }
 
 unsafe impl<K, V> Send for LruCache<K, V> {}
